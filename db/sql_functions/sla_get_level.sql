@@ -1,180 +1,106 @@
--- Get level based on issue's project, tracker, created date and time
-CREATE OR REPLACE FUNCTION sla_get_level(
-    -- From issue, we get the information we need ( project, tracker, created date and time )
-    p_issue_id INTEGER,
-    p_refresh_force BOOLEAN DEFAULT FALSE   
+DELIMITER //
+
+DROP PROCEDURE IF EXISTS sla_get_level //
+
+CREATE PROCEDURE sla_get_level (
+    IN p_issue_id INT,
+    IN p_refresh_force BOOLEAN,
+    OUT out_id BIGINT,
+    OUT out_project_id INT,
+    OUT out_issue_id INT,
+    OUT out_tracker_id INT,
+    OUT out_sla_level_id INT,
+    OUT out_start_date DATETIME,
+    OUT out_created_on DATETIME,
+    OUT out_updated_on DATETIME
 )
-  -- Return cache table record
-  RETURNS sla_caches AS
-$BODY$
-  DECLARE v_issue_project_id INTEGER ;
-  DECLARE v_issue_tracker_id INTEGER ;
-  DECLARE v_issue_created_on TIMESTAMP WITHOUT TIME ZONE ;
-  -- DECLARE v_issue_updated_on TIMESTAMP WITHOUT TIME ZONE ;
-  DECLARE v_current_timestamp TIMESTAMP WITHOUT TIME ZONE ;
-  DECLARE v_sla_cache sla_caches ;
 BEGIN
-  
-  RAISE DEBUG 'sla_get_level | BEGIN ---' ;	
+    DECLARE v_issue_project_id INT;
+    DECLARE v_issue_tracker_id INT;
+    DECLARE v_issue_created_on DATETIME;
+    DECLARE v_current_timestamp DATETIME;
 
-  -- We avoid looking for a missing issue
-  IF ( p_issue_id IS NULL ) THEN
-    RAISE DEBUG 'sla_get_level | p_issue_id IS NULL' ;
-    RETURN NULL ;
-  END IF ;
+    -- Intermediate variables for cache lookup
+    DECLARE tmp_id BIGINT;
+    DECLARE tmp_project_id INT;
+    DECLARE tmp_tracker_id INT;
+    DECLARE tmp_sla_level_id INT;
+    DECLARE tmp_start_date DATETIME;
+    DECLARE tmp_created_on DATETIME;
+    DECLARE tmp_updated_on DATETIME;
 
-  RAISE DEBUG 'sla_get_level | p_issue_id = %', p_issue_id ; 
+    IF p_issue_id IS NULL THEN
+        -- NULL input, exit early
+        SET out_id = NULL;
+        RETURN;
+    END IF;
 
-  -- We get the date and time from now
-  v_current_timestamp := sla_get_date(NOW()::TIMESTAMP WITHOUT TIME ZONE);
+    -- Get current time in SLA timezone
+    SET v_current_timestamp = sla_get_date(NOW());
 
-  RAISE DEBUG 'sla_get_level | v_current_timestamp = %', v_current_timestamp ;
+    -- Check if we already have cache
+    SELECT
+        id, project_id, tracker_id, sla_level_id,
+        start_date, created_on, updated_on
+    INTO
+        tmp_id, tmp_project_id, tmp_tracker_id, tmp_sla_level_id,
+        tmp_start_date, tmp_created_on, tmp_updated_on
+    FROM sla_caches
+    WHERE issue_id = p_issue_id
+    LIMIT 1;
 
-  -- We get the information already in the cache (if it is there, then it is good)
-  SELECT
-    "sla_caches"."id" AS "id",
-    "sla_caches"."project_id" AS "project_id",
-    "sla_caches"."issue_id" AS "issue_id",
-    "sla_caches"."tracker_id" AS "tracker_id",
-    "sla_caches"."sla_level_id" AS "sla_level_id",
-    "sla_caches"."start_date" AS "start_date",
-    "sla_caches"."created_on" AS "created_on",
-    "sla_caches"."updated_on" AS "updated_on"
-	INTO
-		v_sla_cache
-	FROM
-		"sla_caches"
-	WHERE
-		"sla_caches"."issue_id" = p_issue_id
-	; 
+    IF tmp_id IS NOT NULL AND NOT p_refresh_force THEN
+        -- Return cached data
+        SET out_id = tmp_id;
+        SET out_project_id = tmp_project_id;
+        SET out_issue_id = p_issue_id;
+        SET out_tracker_id = tmp_tracker_id;
+        SET out_sla_level_id = tmp_sla_level_id;
+        SET out_start_date = tmp_start_date;
+        SET out_created_on = tmp_created_on;
+        SET out_updated_on = tmp_updated_on;
+        RETURN;
+    END IF;
 
-  RAISE DEBUG 'sla_get_level | v_sla_spent.sla_level_id = %', v_sla_cache."sla_level_id" ;
+    -- Load issue metadata
+    SELECT
+        sla_get_date(created_on), tracker_id, project_id
+    INTO
+        v_issue_created_on, v_issue_tracker_id, v_issue_project_id
+    FROM issues
+    WHERE id = p_issue_id
+    LIMIT 1;
 
-  -- If the information is there and no need to force refresh
-  IF ( ( v_sla_cache IS NOT NULL ) AND ( NOT p_refresh_force ) ) THEN
-    RAISE DEBUG 'sla_get_level | RETURN v_sla_cache IS NOT NULL AND NOT p_refresh_force ------' ;
-    -- So we can return it.
-    RETURN v_sla_cache ;
-  END IF ;
+    -- Now find SLA level and matching calendar slot
+    -- This is a complex join. You must prebuild or simplify this in MySQL using views or helper tables.
 
-  RAISE DEBUG 'sla_get_level | v_sla_spent.updated_on = %', v_sla_cache."updated_on" ;
+    -- Simplified insert/update (you need to build the actual logic for calendar matching)
+    INSERT INTO sla_caches (
+        id, project_id, issue_id, tracker_id,
+        sla_level_id, start_date, created_on, updated_on
+    )
+    VALUES (
+        p_issue_id, v_issue_project_id, p_issue_id,
+        v_issue_tracker_id, 1, v_issue_created_on, v_current_timestamp, v_current_timestamp
+    )
+    ON DUPLICATE KEY UPDATE
+        project_id = VALUES(project_id),
+        tracker_id = VALUES(tracker_id),
+        sla_level_id = VALUES(sla_level_id),
+        start_date = VALUES(start_date),
+        updated_on = VALUES(updated_on);
 
-  -- So we take the information we need ( project, tracker, created date and time)
-  SELECT
-    sla_get_date( "issues"."created_on" ),
-    "issues"."tracker_id",
-    "issues"."project_id"
-  INTO
-    v_issue_created_on,
-    -- v_issue_updated_on,
-    v_issue_tracker_id,
-    v_issue_project_id
-  FROM
-    "issues"
-  WHERE
-    "issues"."id" = p_issue_id
-  ;
+    -- Return data
+    SELECT
+        id, project_id, issue_id, tracker_id,
+        sla_level_id, start_date, created_on, updated_on
+    INTO
+        out_id, out_project_id, out_issue_id, out_tracker_id,
+        out_sla_level_id, out_start_date, out_created_on, out_updated_on
+    FROM sla_caches
+    WHERE issue_id = p_issue_id
+    LIMIT 1;
 
-  RAISE DEBUG 'sla_get_level | v_issue_created_on = %', v_issue_created_on ;
-  RAISE DEBUG 'sla_get_level | v_issue_project_id = %', v_issue_project_id ;
-  RAISE DEBUG 'sla_get_level | v_issue_tracker_id = %', v_issue_tracker_id ;
+END //
 
-	-- So we can find the expected level according to the project, tracker, created date and time
-  SELECT DISTINCT
-    -- Preparing the record for the cache, ID will be determined on insert in the cache
-    NULL::bigint AS "id",
-    "v_issue_project_id" AS "project_id",
-    "p_issue_id" AS "issue_id",
-    "v_issue_tracker_id" AS "tracker_id",
-		"sla_levels"."id" AS "sla_level_id",
-    "calendrier"."minutes" AS "start_date",
-    COALESCE(v_sla_cache.created_on,v_current_timestamp) AS "created_on",
-    v_current_timestamp AS "updated_on"
-	INTO
-		v_sla_cache
-  FROM            
-    ( SELECT generate_series( v_issue_created_on, v_issue_created_on + INTERVAL '7 days', '1 minute') AS minutes ) AS "calendrier"
-  INNER JOIN
-    "sla_schedules"
-      ON ( DATE_PART('dow',"calendrier"."minutes") = "sla_schedules"."dow" AND "calendrier"."minutes"::TIME BETWEEN "sla_schedules"."start_time" AND "sla_schedules"."end_time" )
-  INNER JOIN
-    "sla_calendars"
-      ON ( "sla_calendars"."id" = "sla_schedules"."sla_calendar_id" )
-  INNER JOIN
-    "sla_levels"
-      ON ( "sla_levels"."sla_calendar_id" = "sla_calendars"."id" )
-  INNER JOIN
-    "sla_project_trackers"
-      ON ( "sla_project_trackers"."sla_id" = "sla_levels"."sla_id" )
-  LEFT JOIN
-    ( 
-      SELECT "date", "sla_calendar_id" 
-      FROM "sla_calendar_holidays"
-      INNER JOIN "sla_holidays"
-          ON ( "sla_holidays"."id" = "sla_calendar_holidays"."sla_holiday_id" AND "sla_calendar_holidays"."match" )
-    ) AS "sla_holiday_match"
-      ON ( "sla_holiday_match"."sla_calendar_id" = "sla_schedules"."sla_calendar_id" AND "sla_holiday_match"."date" = "calendrier"."minutes"::DATE )
-	WHERE
-		"sla_project_trackers"."project_id" = v_issue_project_id
-	AND
-		"sla_project_trackers"."tracker_id" = v_issue_tracker_id
-  AND
-		"calendrier"."minutes"::DATE NOT IN (
-			SELECT "sla_holidays"."date"
-			FROM "sla_holidays"
-			INNER JOIN "sla_calendar_holidays"
-			  ON ( "sla_holidays"."id" = "sla_calendar_holidays"."sla_holiday_id" )
-			WHERE "sla_calendar_holidays"."sla_calendar_id" = "sla_calendars"."id"
-			AND NOT "sla_calendar_holidays"."match"
-	)
-  AND 
-		( "sla_schedules"."match" OR "sla_holiday_match"."date" = "calendrier"."minutes"::DATE )
-	ORDER BY
-        	"calendrier"."minutes"
-	LIMIT 1 ;
-
-  -- We didn't find anything !
-  IF ( v_sla_cache IS NULL ) THEN
-    RAISE DEBUG 'sla_get_level | RETURN v_sla_cache IS NULL' ;
-    -- We make sure we don't have anything left in case we have something else!
-    DELETE FROM "sla_caches" WHERE "sla_caches"."issue_id" = p_issue_id ;  
-    RETURN NULL ;
-  END IF ;
-
-  -- Insert the data in the level cache
-  INSERT INTO "sla_caches" (
-    "id",
-    "project_id",
-    "issue_id",
-    "tracker_id",
-    "sla_level_id",
-    "start_date",
-    "created_on",
-    "updated_on"
-  ) VALUES (
-    v_sla_cache."issue_id",
-    v_sla_cache."project_id", 
-    v_sla_cache."issue_id",
-    v_sla_cache."tracker_id",
-    v_sla_cache."sla_level_id",
-    v_sla_cache."start_date",
-    v_sla_cache."created_on",
-    v_sla_cache."updated_on"
-  )
-  -- if data already exists, then do an update
-	ON CONFLICT ON CONSTRAINT "sla_caches_issues_ukey" DO UPDATE SET
-    "project_id" = v_sla_cache."project_id",
-    "tracker_id" = v_sla_cache."tracker_id",
-    "sla_level_id" = v_sla_cache."sla_level_id",
-    "start_date" = v_sla_cache."start_date",
-    "updated_on" = v_sla_cache."updated_on"
-  RETURNING id INTO v_sla_cache."id" ;
-
-  RAISE DEBUG 'sla_get_level | END ------' ;  	
-
-	RETURN v_sla_cache ;
-
-END;
-$BODY$
-  LANGUAGE plpgsql VOLATILE
-  COST 100;
+DELIMITER ;

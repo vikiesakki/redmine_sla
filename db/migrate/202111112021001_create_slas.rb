@@ -2,9 +2,9 @@ class CreateSlas < ActiveRecord::Migration[5.2]
 
   def change
     create_table :slas do |t|
-      t.text :name, :null => false, index: { name: 'slas_name_ukey', unique: true}
+      t.string :name, null: false
     end
-    say "Created table slas"
   end
+  add_index :slas, :name, unique: true, name: 'slas_name_ukey'
 
 end

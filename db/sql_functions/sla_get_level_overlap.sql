@@ -1,27 +1,52 @@
--- Checks if SLA levels overlap
-CREATE OR REPLACE FUNCTION sla_get_level_overlap(p_sla_id INTEGER) RETURNS BOOLEAN
-  LANGUAGE sql
-  AS $BODY$
-SELECT DISTINCT TRUE
-  FROM            
-    ( SELECT generate_series( NOW(), NOW() + INTERVAL '7 days', '1 minute') AS minutes ) AS "calendrier"
-  INNER JOIN
-    "sla_schedules"
-      ON ( DATE_PART('dow',"calendrier"."minutes") = "sla_schedules"."dow" AND "calendrier"."minutes"::TIME BETWEEN "sla_schedules"."start_time" AND "sla_schedules"."end_time" )
-  INNER JOIN
-    "sla_calendars"
-      ON ( "sla_calendars"."id" = "sla_schedules"."sla_calendar_id" )
-  INNER JOIN
-    "sla_levels"
-      ON ( "sla_levels"."sla_calendar_id" = "sla_calendars"."id" )
-  INNER JOIN
-    "sla_project_trackers"
-      ON ( "sla_project_trackers"."sla_id" = "sla_levels"."sla_id" )
-  WHERE
-    "sla_levels"."sla_id" = p_sla_id
-  AND
-    ( "sla_schedules"."match" )
-  GROUP BY
-    "calendrier"."minutes"
-  HAVING COUNT(*)>1 ;
-$BODY$
+CREATE TABLE calendar_minutes (
+  minute DATETIME PRIMARY KEY
+);
+
+-- Fill with minutes over 7 days (you can schedule this)
+INSERT INTO calendar_minutes (minute)
+SELECT DATE_ADD(NOW(), INTERVAL seq MINUTE)
+FROM (
+  SELECT @row := @row + 1 AS seq
+  FROM (SELECT 0 UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3
+        UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7
+        UNION ALL SELECT 8 UNION ALL SELECT 9) AS ones,
+       (SELECT 0 UNION ALL SELECT 10 UNION ALL SELECT 20 UNION ALL SELECT 30
+        UNION ALL SELECT 40 UNION ALL SELECT 50 UNION ALL SELECT 60) AS tens,
+       (SELECT @row := 0) AS init
+) AS minutes
+WHERE seq <= 10080;  -- 7 days * 24 hours * 60 minutes
+
+
+
+DELIMITER //
+
+DROP FUNCTION IF EXISTS sla_get_level_overlap //
+
+CREATE FUNCTION sla_get_level_overlap(p_sla_id INT)
+RETURNS BOOLEAN
+DETERMINISTIC
+BEGIN
+    DECLARE v_overlap_found BOOLEAN DEFAULT FALSE;
+
+    -- Check for overlapping time slots on the same calendar minute
+    SELECT 1 INTO v_overlap_found
+    FROM (
+        SELECT cm.minute
+        FROM calendar_minutes cm
+        JOIN sla_schedules ss
+            ON DAYOFWEEK(cm.minute) - 1 = ss.dow  -- MySQL: Sunday = 1, PostgreSQL = 0
+           AND CAST(cm.minute AS TIME) BETWEEN ss.start_time AND ss.end_time
+        JOIN sla_calendars sc ON sc.id = ss.sla_calendar_id
+        JOIN sla_levels sl ON sl.sla_calendar_id = sc.id
+        JOIN sla_project_trackers spt ON spt.sla_id = sl.sla_id
+        WHERE sl.sla_id = p_sla_id
+          AND ss.match = TRUE
+        GROUP BY cm.minute
+        HAVING COUNT(*) > 1
+        LIMIT 1
+    ) AS overlapping;
+
+    RETURN v_overlap_found;
+END //
+
+DELIMITER ;
